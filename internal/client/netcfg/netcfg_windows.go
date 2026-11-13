@@ -114,6 +114,14 @@ func Open(cfg Config) (Adapter, error) {
 		dev.Close()
 		return nil, fmt.Errorf("Lanora could not configure its network adapter: %w", err)
 	}
+	if cfg.LANPriority {
+		if err := preferForBroadcast(luid); err != nil {
+			log.Warn("could not give the adapter's broadcast route the lowest metric; programs that search "+
+				"\"the local network\" may look on another adapter", "err", err)
+		} else {
+			log.Info("the adapter's broadcast route has the lowest metric")
+		}
+	}
 	log.Info("the adapter has its address; nothing else on this computer was changed",
 		"address", netip.PrefixFrom(cfg.IP, cfg.Subnet.Bits()), "lan_priority", cfg.LANPriority)
 
@@ -190,6 +198,25 @@ func configure(luid winipcfg.LUID, cfg Config) error {
 		ipif.Set()
 	}
 	return nil
+}
+
+// preferForBroadcast lowers the metric of this adapter's own route to the
+// limited broadcast address (255.255.255.255) to zero. Windows sends such a
+// broadcast out of the adapter whose route to it costs least, and the cost
+// is the interface metric plus the route's own, 256 by default. Interface
+// metric 1 is as low as that goes, and another VPN's adapter can have it
+// too (Astrill's does), which leaves a tie that Lanora loses. Only this
+// adapter's own route is touched.
+func preferForBroadcast(luid winipcfg.LUID) error {
+	broadcast := netip.PrefixFrom(netip.AddrFrom4([4]byte{255, 255, 255, 255}), 32)
+	return settle(func() error {
+		row, err := luid.Route(broadcast, netip.IPv4Unspecified())
+		if err != nil {
+			return luid.AddRoute(broadcast, netip.IPv4Unspecified(), 0)
+		}
+		row.Metric = 0
+		return row.Set()
+	})
 }
 
 // finish does the parts of set-up that are worth having but not worth

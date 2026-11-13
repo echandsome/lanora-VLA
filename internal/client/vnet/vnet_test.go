@@ -237,3 +237,68 @@ func TestBroadcastRoundTripBetweenTwoDevices(t *testing.T) {
 		t.Fatalf("the peer's adapter did not receive the original multicast packet")
 	}
 }
+
+// udpChecksum computes the UDP checksum of an IPv4 packet from scratch.
+func udpChecksum(pkt []byte) uint16 {
+	udp := pkt[ipv4HeaderLen:]
+	var sum uint32
+	add := func(b []byte) {
+		for i := 0; i+1 < len(b); i += 2 {
+			sum += uint32(binary.BigEndian.Uint16(b[i:]))
+		}
+		if len(b)%2 == 1 {
+			sum += uint32(b[len(b)-1]) << 8
+		}
+	}
+	add(pkt[12:20])
+	sum += 17 + uint32(len(udp))
+	saved := [2]byte{udp[6], udp[7]}
+	udp[6], udp[7] = 0, 0
+	add(udp)
+	udp[6], udp[7] = saved[0], saved[1]
+	for sum>>16 != 0 {
+		sum = sum&0xffff + sum>>16
+	}
+	if c := ^uint16(sum); c != 0 {
+		return c
+	}
+	return 0xffff
+}
+
+// Windows can send a program's broadcast out of the room's adapter under
+// another adapter's address. It must still reach the room, from this
+// machine's room address and with valid checksums.
+func TestBroadcastFromAnotherAdaptersAddressIsAdopted(t *testing.T) {
+	for _, payload := range []string{"1:100:Jack:PC:1:Jack", "odd"} {
+		d, f := newDevice()
+		udp := make([]byte, 8+len(payload))
+		binary.BigEndian.PutUint16(udp[0:], 2425)
+		binary.BigEndian.PutUint16(udp[2:], 2425)
+		binary.BigEndian.PutUint16(udp[4:], uint16(len(udp)))
+		copy(udp[8:], payload)
+		orig := packet("172.20.1.73", "255.255.255.255", 17, string(udp))
+		binary.BigEndian.PutUint16(orig[ipv4HeaderLen+6:], udpChecksum(orig))
+		f.out <- orig
+		// A unicast under a foreign address is still refused.
+		f.out <- packet("172.20.1.73", "10.214.3.6", 17, "foreign unicast")
+
+		got := readAll(t, d, f, 1)
+		if len(got) != 2 {
+			t.Fatalf("%d copies, want one per peer", len(got))
+		}
+		inner := got[0][ipv4HeaderLen:]
+		src, dst, _, ok := ipv4(inner)
+		if !ok || src != selfIP.As4() || dst != [4]byte{255, 255, 255, 255} {
+			t.Fatalf("inner packet from %v to %v", src, dst)
+		}
+		if headerChecksum(inner[:ipv4HeaderLen]) != 0 {
+			t.Error("the inner IPv4 header checksum is wrong")
+		}
+		if got, want := binary.BigEndian.Uint16(inner[ipv4HeaderLen+6:]), udpChecksum(inner); got != want {
+			t.Errorf("UDP checksum %#04x, want %#04x", got, want)
+		}
+		if st := d.Stats(); st.Adopted != 1 || st.Filtered != 1 {
+			t.Errorf("adopted %d, filtered %d; want 1 and 1", st.Adopted, st.Filtered)
+		}
+	}
+}

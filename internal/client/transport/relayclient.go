@@ -13,9 +13,21 @@ import (
 
 // Relay binding timing.
 const (
-	bindRetry      = time.Second      // between bind attempts while unbound
-	bindKeepalive  = 10 * time.Second // refresh while bound (also keeps the NAT mapping open)
-	bindLost       = 25 * time.Second // no ack for this long: the binding is gone
+	bindRetry     = time.Second      // between bind attempts while unbound
+	bindKeepalive = 5 * time.Second  // refresh while bound (also keeps the NAT mapping open)
+	bindLost      = 16 * time.Second // no ack for this long: the binding is gone
+
+	// A network on which UDP to the relay works for a moment and then dies
+	// (seen on a mobile carrier) must not be allowed to pull the client off
+	// a working TCP stream again and again: every such switch is a silence
+	// of bindLost. After UDP has failed once, it is left alone for a while
+	// and must then answer several probes in a row before it is used again.
+	udpHoldFirst   = 30 * time.Second
+	udpHoldMax     = 10 * time.Minute
+	probeEvery     = 2 * time.Second
+	probesNeeded   = 5
+	udpProven      = 5 * time.Minute // bound this long: the earlier failures are forgiven
+	streamGiveUp   = 20 * time.Second
 	streamAfter    = 5 * time.Second  // UDP silent this long: also try the TCP fallback
 	streamKeep     = 20 * time.Second // idle keepalive on the stream
 	streamQueueLen = 512
@@ -53,6 +65,14 @@ type relayClient struct {
 	reflexive  netip.AddrPort
 	rejected   bool // the relay refused our ticket; wait for a new one
 	dialing    bool
+
+	udpFailures  int       // UDP bindings lost in a row
+	udpHoldUntil time.Time // no UDP attempts before this
+	probeTx      proto.TxID
+	probeSentAt  time.Time
+	probeWaiting bool // the last probe has not been answered
+	probeOK      int  // probes answered in a row
+	boundSince   time.Time
 
 	// Read on the packet path without the lock.
 	bound  atomic.Bool
@@ -177,7 +197,23 @@ func (r *relayClient) tick(now time.Time) {
 
 	var frame []byte
 	needStream := false
+	canStream := r.info.WS != "" && r.t.cfg.DialStream != nil
 	switch {
+	case !r.bound.Load() && r.udpFailures > 0 && canStream && r.probeOK < probesNeeded &&
+		(r.stream.Load() != nil || r.firstTry.IsZero() || now.Sub(r.firstTry) < streamGiveUp):
+		// UDP has failed before and TCP is available: stay on TCP, and
+		// only probe UDP once the hold is over.
+		if r.firstTry.IsZero() {
+			r.firstTry = now.Add(-streamAfter)
+		}
+		needStream = true
+		if !now.Before(r.udpHoldUntil) && now.Sub(r.probeSentAt) >= probeEvery {
+			if r.probeWaiting {
+				r.probeOK = 0
+			}
+			r.probeTx, r.probeSentAt, r.probeWaiting = proto.NewTxID(), now, true
+			frame = proto.AppendProbe(nil, r.probeTx)
+		}
 	case !r.bound.Load():
 		if now.Sub(r.lastTry) >= bindRetry {
 			if r.firstTry.IsZero() {
@@ -189,9 +225,18 @@ func (r *relayClient) tick(now time.Time) {
 		needStream = !r.firstTry.IsZero() && now.Sub(r.firstTry) >= streamAfter
 	case now.Sub(r.lastAck) >= bindLost:
 		r.bound.Store(false)
-		r.firstTry, r.lastTry = time.Time{}, time.Time{}
-		r.t.log.Warn("relay stopped answering; rebinding")
+		r.lastTry = time.Time{}
+		r.firstTry = now.Add(-streamAfter) // go to TCP at once
+		needStream = true
+		r.udpFailures++
+		hold := udpHoldFirst << min(r.udpFailures-1, 8)
+		r.udpHoldUntil = now.Add(min(hold, udpHoldMax))
+		r.probeOK, r.probeWaiting = 0, false
+		r.t.log.Warn("relay stopped answering over UDP; using TCP", "udp_failures", r.udpFailures, "next_udp_try_in", min(hold, udpHoldMax).String())
 	case now.Sub(r.lastTry) >= bindKeepalive:
+		if r.udpFailures > 0 && now.Sub(r.boundSince) >= udpProven {
+			r.udpFailures = 0
+		}
 		r.lastTry, r.tx = now, proto.NewTxID()
 		frame = proto.AppendBindConfirm(nil, r.tx, r.info.Claims, r.cookie, r.info.Key)
 	}
@@ -232,12 +277,19 @@ func (r *relayClient) handle(frame []byte) {
 			r.lastAck = time.Now()
 			r.firstTry = time.Time{}
 			if !r.bound.Swap(true) {
+				r.boundSince = r.lastAck
 				r.t.log.Info("bound to relay", "relay", r.addr.String(), "public", observed.String())
 				changed = true
 			}
 			if observed != r.reflexive {
 				r.reflexive, changed = observed, true
 			}
+		}
+
+	case proto.FrameProbeReply:
+		if len(frame) == proto.ProbeLen && r.probeWaiting && proto.FrameTxID(frame) == r.probeTx {
+			r.probeWaiting = false
+			r.probeOK++
 		}
 
 	case proto.FrameBindReject:
@@ -313,6 +365,8 @@ func (r *relayClient) rebind() {
 	r.bound.Store(false)
 	r.hasCookie = false
 	r.firstTry, r.lastTry = time.Time{}, time.Time{}
+	// A different network: what UDP did on the old one says nothing.
+	r.udpFailures, r.udpHoldUntil, r.probeOK, r.probeWaiting = 0, time.Time{}, 0, false
 	r.mu.Unlock()
 }
 

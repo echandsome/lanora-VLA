@@ -370,7 +370,7 @@ func (t *Transport) handleFrame(frame []byte, from netip.AddrPort) ([]byte, *pee
 		}
 		return t.handleRelayed(frame[proto.HeaderLen:])
 
-	case proto.FrameBindChallenge, proto.FrameBindAck, proto.FrameBindReject, proto.FrameRelayUnbound:
+	case proto.FrameBindChallenge, proto.FrameBindAck, proto.FrameBindReject, proto.FrameRelayUnbound, proto.FrameProbeReply:
 		if t.relay.isRelay(from) {
 			t.relay.handle(frame)
 		}

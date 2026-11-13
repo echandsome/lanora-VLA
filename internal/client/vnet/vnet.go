@@ -53,6 +53,7 @@ type Stats struct {
 	FanoutDropped uint64 // not replicated: over budget, or queue full
 	Delivered     uint64 // broadcast/multicast packets received from peers
 	Filtered      uint64 // packets dropped by the address filter
+	Adopted       uint64 // broadcasts sent under another adapter's address, re-sourced to this one's
 }
 
 // Device wraps the adapter's tun.Device.
@@ -74,7 +75,7 @@ type Device struct {
 	tokens  float64
 	refill  time.Time
 
-	fanoutPackets, fanoutCopies, fanoutDropped, delivered, filtered atomic.Uint64
+	fanoutPackets, fanoutCopies, fanoutDropped, delivered, filtered, adopted atomic.Uint64
 }
 
 type pendingCopy struct {
@@ -112,6 +113,7 @@ func (d *Device) Stats() Stats {
 		FanoutDropped: d.fanoutDropped.Load(),
 		Delivered:     d.delivered.Load(),
 		Filtered:      d.filtered.Load(),
+		Adopted:       d.adopted.Load(),
 	}
 }
 
@@ -152,6 +154,15 @@ func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 		for i := 0; i < n; i++ {
 			pkt := bufs[i][offset : offset+sizes[i]]
 			src, dst, proto, ok := ipv4(pkt)
+			if ok && src != d.self && d.isGroup(dst) && adopt(pkt, d.self) {
+				// Windows can send a program's broadcast out of this
+				// adapter under another adapter's address (the program
+				// bound to that one, or Windows chose it). It is this
+				// machine's broadcast all the same, and peers must be able
+				// to answer it: give it the room address.
+				src = d.self
+				d.adopted.Add(1)
+			}
 			switch {
 			case !ok || src != d.self:
 				// Not IPv4, or not from this adapter's address.
@@ -247,6 +258,56 @@ func (d *Device) drain(bufs [][]byte, sizes []int, offset int) int {
 
 // headerChecksum computes the IPv4 header checksum of hdr, whose checksum
 // field must be zero.
+// adopt rewrites the source address of an IPv4 packet to self and repairs
+// the checksums that cover it. It reports false, leaving the packet alone,
+// if the packet is not one it knows how to repair.
+func adopt(pkt []byte, self [4]byte) bool {
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl < ipv4HeaderLen || len(pkt) < ihl {
+		return false
+	}
+	var old [4]byte
+	copy(old[:], pkt[12:16])
+	first := binary.BigEndian.Uint16(pkt[6:])&0x1fff == 0 // carries the transport header
+	const protoUDP, protoTCP = 17, 6
+	switch pkt[9] {
+	case protoUDP:
+		if first {
+			if len(pkt) < ihl+8 {
+				return false
+			}
+			// A UDP checksum of zero means "none" and stays that way.
+			if c := binary.BigEndian.Uint16(pkt[ihl+6:]); c != 0 {
+				c = replaceInChecksum(c, old, self)
+				if c == 0 {
+					c = 0xffff
+				}
+				binary.BigEndian.PutUint16(pkt[ihl+6:], c)
+			}
+		}
+	case protoTCP:
+		return false // nothing sends TCP to a group address
+	}
+	copy(pkt[12:16], self[:])
+	pkt[10], pkt[11] = 0, 0
+	binary.BigEndian.PutUint16(pkt[10:], headerChecksum(pkt[:ihl]))
+	return true
+}
+
+// replaceInChecksum updates an Internet checksum for four bytes of the data
+// it covers changing from old to new (RFC 1624).
+func replaceInChecksum(sum uint16, old, new [4]byte) uint16 {
+	acc := uint32(^sum)
+	for i := 0; i < 4; i += 2 {
+		acc += uint32(^binary.BigEndian.Uint16(old[i:]))
+		acc += uint32(binary.BigEndian.Uint16(new[i:]))
+	}
+	for acc>>16 != 0 {
+		acc = acc&0xffff + acc>>16
+	}
+	return ^uint16(acc)
+}
+
 func headerChecksum(hdr []byte) uint16 {
 	var sum uint32
 	for i := 0; i+1 < len(hdr); i += 2 {
