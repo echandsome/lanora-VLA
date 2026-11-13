@@ -255,7 +255,10 @@ func (v *view) layoutConnecting(gtx C, st ipc.Status) D {
 				return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
 					gap(sp4),
 					layout.Rigid(func(gtx C) D {
-						gtx.Constraints = layout.Exact(gtx.Constraints.Constrain(layoutSquare(gtx, 36)))
+						// Exactly this size, whatever the card asks for: the
+						// spinner draws itself as wide as its minimum width,
+						// and the card's minimum is the card's whole width.
+						gtx.Constraints = layout.Exact(layoutSquare(gtx, 36))
 						loader := material.Loader(th.Theme)
 						loader.Color = th.pal.Line
 						return loader.Layout(gtx)
