@@ -107,6 +107,16 @@ build/windows   icon and resource definitions for the .exe
 docs/           documentation
 ```
 
+## Licence and contributing
+
+Lanora is released under the [MIT licence](LICENSE): anyone may use, change
+and redistribute it, provided the copyright notice is kept.
+
+Pull requests are welcome. By opening one you agree that your contribution is
+licensed under the same MIT licence. Please run `make test` and `make vet`
+first, and describe what you tested; changes to how the Windows adapter is
+set up need a note on how they were checked next to another VPN.
+
 ## Third-party software
 
 Lanora builds on WireGuard's Go implementation and Wintun (WireGuard LLC),
