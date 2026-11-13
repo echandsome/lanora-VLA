@@ -1,0 +1,10 @@
+.git
+dist
+data
+test
+docs
+build
+*.exe
+*.syso
+*.db
+.env

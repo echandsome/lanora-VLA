@@ -1,0 +1,19 @@
+# Build output
+/dist/
+/bin/
+*.exe
+*.syso
+*.test
+*.out
+
+# Local data
+/data/
+*.db
+*.db-wal
+*.db-shm
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

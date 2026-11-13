@@ -1,0 +1,33 @@
+# A stand-alone relay node, for spreading relay traffic over more hosts or
+# placing relays closer to players.
+#
+# On each relay host:
+#   LANORA_RELAY_SECRET=<the same long random string everywhere> \
+#     docker compose -f deploy/docker-compose.relay.yml up -d
+#
+# On the control server, in .env:
+#   LANORA_RELAY_SECRET=<the same string>
+#   LANORA_RELAYS=relay1.example.com:8443,relay2.example.com:8443
+#
+# Each room is assigned to one relay. The control server probes the relays
+# and moves rooms off one that stops answering. A relay holds no data and
+# can be added or removed at any time.
+
+services:
+  relay:
+    build: ..
+    image: lanora-server:latest
+    restart: unless-stopped
+    environment:
+      LANORA_MODE: relay
+      LANORA_LISTEN: ":8443"
+      LANORA_RELAY_SECRET: "${LANORA_RELAY_SECRET:?set LANORA_RELAY_SECRET}"
+      # The relay's TCP fallback needs a certificate browsers and clients
+      # trust. With a host name, switch to autocert as in
+      # docker-compose.domain.yml; with "off", put a TLS proxy in front or
+      # accept that only the UDP relay is usable on this node.
+      LANORA_TLS: "${LANORA_TLS:-off}"
+    # Host networking: the relay forwards packets, and every layer of
+    # address translation in front of it costs throughput.
+    network_mode: host
+    stop_grace_period: 10s

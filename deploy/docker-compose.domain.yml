@@ -1,0 +1,37 @@
+# Lanora server with a domain name and a Let's Encrypt certificate.
+#
+#   LANORA_DOMAIN=lan.example.com docker compose -f deploy/docker-compose.domain.yml up -d
+#
+# Requirements: the domain's DNS points at this host, and TCP 80, TCP 443
+# and UDP 443 are reachable from the internet. Clients then use plain
+# https://lan.example.com with no pin.
+
+services:
+  lanora:
+    build: ..
+    image: lanora-server:latest
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      LANORA_LISTEN: ":443"
+      LANORA_TLS: autocert
+      LANORA_TLS_DOMAINS: "${LANORA_DOMAIN:?set LANORA_DOMAIN to the server's host name}"
+      LANORA_ACME_LISTEN: ":80"
+      LANORA_ACME_EMAIL: "${LANORA_ACME_EMAIL:-}"
+    # Lets the unprivileged server process bind ports 80 and 443.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - lanora-data:/data
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    stop_grace_period: 20s
+
+volumes:
+  lanora-data:

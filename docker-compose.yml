@@ -1,0 +1,41 @@
+# Lanora server: the simplest deployment.
+#
+#   cp .env.example .env      # and set LANORA_ADMIN_PASSWORD
+#   docker compose up -d
+#   docker compose logs lanora
+#
+# This works on any host, including one that only has an IP address: the
+# server makes its own certificate, and clients are given its fingerprint
+# (the "pin") as part of the server address. The log prints that address.
+#
+# With a domain name, use deploy/docker-compose.domain.yml instead: it gets
+# a certificate from Let's Encrypt and needs no pin.
+
+services:
+  lanora:
+    build: .
+    image: lanora-server:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LANORA_LISTEN: ":8443"
+      LANORA_TLS: selfsigned
+    ports:
+      # The same number for TCP and UDP. If you publish a different host
+      # port, set LANORA_RELAY_PUBLIC in .env to ":<host port>" so clients
+      # are told the right one.
+      - "8443:8443/tcp"
+      - "8443:8443/udp"
+    volumes:
+      - lanora-data:/data
+    # Each connected client holds one connection.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Time for clients to be told the server is going away and to flush the
+    # log.
+    stop_grace_period: 20s
+
+volumes:
+  lanora-data:
